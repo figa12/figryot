@@ -39,9 +39,9 @@ use fitness_models::{
 use importer_models::{ImportDetails, ImportFailStep, ImportFailedItem, ImportResultResponse};
 use itertools::Itertools;
 use media_models::{
-    CommitCache, CommitMediaInput, CommitPersonInput, CreateOrUpdateCollectionInput,
-    CreateOrUpdateReviewInput, ImportOrExportItemRating, MetadataDetails, MetadataImage,
-    PartialMetadata, PartialMetadataPerson, PartialMetadataWithoutId, ProgressUpdateError,
+    CommitMediaInput, CommitPersonInput, CreateOrUpdateCollectionInput, CreateOrUpdateReviewInput,
+    ImportOrExportItemRating, MetadataDetails, MetadataImage, PartialMetadata,
+    PartialMetadataPerson, PartialMetadataWithoutId, ProgressUpdateError,
     ProgressUpdateErrorVariant, ProgressUpdateInput, ProgressUpdateResultUnion, ReviewPostedEvent,
     SeenAnimeExtraInformation, SeenMangaExtraInformation, SeenPodcastExtraInformation,
     SeenShowExtraInformation,
@@ -107,11 +107,11 @@ pub async fn metadata_images_as_urls(
 }
 
 pub async fn get_openlibrary_service(config: &config::AppConfig) -> Result<OpenlibraryService> {
-    Ok(OpenlibraryService::new(&config.books.openlibrary, config.frontend.page_size).await)
+    Ok(OpenlibraryService::new(&config.books.openlibrary).await)
 }
 
 pub async fn get_isbn_service(config: &config::AppConfig) -> Result<GoogleBooksService> {
-    Ok(GoogleBooksService::new(&config.books.google_books, config.frontend.page_size).await)
+    Ok(GoogleBooksService::new(&config.books.google_books).await)
 }
 
 pub async fn get_tmdb_non_media_service(
@@ -132,77 +132,40 @@ pub async fn get_metadata_provider(
 ) -> Result<Provider> {
     let err = || Err(Error::new("This source is not supported".to_owned()));
     let service: Provider = match source {
-        MediaSource::Vndb => {
-            Box::new(VndbService::new(&ss.config.visual_novels, ss.config.frontend.page_size).await)
-        }
+        MediaSource::Vndb => Box::new(VndbService::new(&ss.config.visual_novels).await),
         MediaSource::Openlibrary => Box::new(get_openlibrary_service(&ss.config).await?),
-        MediaSource::Itunes => Box::new(
-            ITunesService::new(&ss.config.podcasts.itunes, ss.config.frontend.page_size).await,
-        ),
+        MediaSource::Itunes => Box::new(ITunesService::new(&ss.config.podcasts.itunes).await),
         MediaSource::GoogleBooks => Box::new(get_isbn_service(&ss.config).await?),
-        MediaSource::Audible => Box::new(
-            AudibleService::new(&ss.config.audio_books.audible, ss.config.frontend.page_size).await,
-        ),
-        MediaSource::Listennotes => Box::new(
-            ListennotesService::new(&ss.config.podcasts, ss.config.frontend.page_size).await,
-        ),
+        MediaSource::Audible => Box::new(AudibleService::new(&ss.config.audio_books.audible).await),
+        MediaSource::Listennotes => Box::new(ListennotesService::new(&ss.config.podcasts).await),
         MediaSource::Tmdb => match lot {
             MediaLot::Show => Box::new(
-                TmdbShowService::new(
-                    &ss.config.movies_and_shows.tmdb,
-                    Arc::new(ss.timezone),
-                    ss.config.frontend.page_size,
-                )
-                .await,
+                TmdbShowService::new(&ss.config.movies_and_shows.tmdb, Arc::new(ss.timezone)).await,
             ),
             MediaLot::Movie => Box::new(
-                TmdbMovieService::new(
-                    &ss.config.movies_and_shows.tmdb,
-                    Arc::new(ss.timezone),
-                    ss.config.frontend.page_size,
-                )
-                .await,
+                TmdbMovieService::new(&ss.config.movies_and_shows.tmdb, Arc::new(ss.timezone))
+                    .await,
             ),
             _ => return err(),
         },
         MediaSource::Anilist => match lot {
-            MediaLot::Anime => Box::new(
-                AnilistAnimeService::new(
-                    &ss.config.anime_and_manga.anilist,
-                    ss.config.frontend.page_size,
-                )
-                .await,
-            ),
-            MediaLot::Manga => Box::new(
-                AnilistMangaService::new(
-                    &ss.config.anime_and_manga.anilist,
-                    ss.config.frontend.page_size,
-                )
-                .await,
-            ),
+            MediaLot::Anime => {
+                Box::new(AnilistAnimeService::new(&ss.config.anime_and_manga.anilist).await)
+            }
+            MediaLot::Manga => {
+                Box::new(AnilistMangaService::new(&ss.config.anime_and_manga.anilist).await)
+            }
             _ => return err(),
         },
         MediaSource::Mal => match lot {
-            MediaLot::Anime => Box::new(
-                MalAnimeService::new(&ss.config.anime_and_manga.mal, ss.config.frontend.page_size)
-                    .await,
-            ),
-            MediaLot::Manga => Box::new(
-                MalMangaService::new(&ss.config.anime_and_manga.mal, ss.config.frontend.page_size)
-                    .await,
-            ),
+            MediaLot::Anime => Box::new(MalAnimeService::new(&ss.config.anime_and_manga.mal).await),
+            MediaLot::Manga => Box::new(MalMangaService::new(&ss.config.anime_and_manga.mal).await),
             _ => return err(),
         },
-        MediaSource::Igdb => {
-            Box::new(IgdbService::new(&ss.config.video_games, ss.config.frontend.page_size).await)
+        MediaSource::Igdb => Box::new(IgdbService::new(&ss.config.video_games).await),
+        MediaSource::MangaUpdates => {
+            Box::new(MangaUpdatesService::new(&ss.config.anime_and_manga.manga_updates).await)
         }
-        MediaSource::MangaUpdates => Box::new(
-            MangaUpdatesService::new(
-                &ss.config.anime_and_manga.manga_updates,
-                ss.config.frontend.page_size,
-            )
-            .await,
-        ),
         MediaSource::Custom => return err(),
     };
     Ok(service)
@@ -692,8 +655,8 @@ pub async fn get_users_and_cte_monitoring_entity(
 ) -> Result<Vec<(String, Uuid)>> {
     let all_entities = MonitoredEntity::find()
         .select_only()
-        .column(monitored_entity::Column::CollectionToEntityId)
         .column(monitored_entity::Column::UserId)
+        .column(monitored_entity::Column::CollectionToEntityId)
         .filter(monitored_entity::Column::EntityId.eq(entity_id))
         .filter(monitored_entity::Column::EntityLot.eq(entity_lot))
         .into_tuple::<(String, Uuid)>()
@@ -875,19 +838,10 @@ pub async fn commit_metadata(
         let media = commit_metadata_internal(details, None, ss).await?;
         return Ok(media);
     };
-    let cached_metadata = CommitCache {
-        id: m.id.clone(),
-        lot: EntityLot::Metadata,
-    };
-    if ss.commit_cache.get(&cached_metadata).await.is_some() {
-        return Ok(m);
-    }
-    ss.commit_cache.insert(cached_metadata.clone(), ()).await;
     if input.force_update.unwrap_or_default() {
         ryot_log!(debug, "Forcing update of metadata with id {}", &m.id);
         update_metadata_and_notify_users(&m.id, true, ss).await?;
     }
-    ss.commit_cache.remove(&cached_metadata).await;
     Ok(m)
 }
 
@@ -1293,10 +1247,10 @@ pub async fn handle_after_media_seen_tasks(
 }
 
 pub async fn progress_update(
-    input: ProgressUpdateInput,
     user_id: &String,
     // update only if media has not been consumed for this user in the last `n` duration
     respect_cache: bool,
+    input: ProgressUpdateInput,
     ss: &Arc<SupportingService>,
 ) -> Result<ProgressUpdateResultUnion> {
     let cache = ApplicationCacheKey::ProgressUpdateCache {
@@ -2020,6 +1974,8 @@ pub async fn process_import(
                 Some(dec!(100))
             };
             if let Err(e) = progress_update(
+                user_id,
+                respect_cache,
                 ProgressUpdateInput {
                     metadata_id: metadata.id.clone(),
                     progress,
@@ -2033,8 +1989,6 @@ pub async fn process_import(
                     provider_watched_on: seen.provider_watched_on.clone(),
                     change_state: None,
                 },
-                user_id,
-                respect_cache,
                 ss,
             )
             .await
@@ -2086,8 +2040,8 @@ pub async fn process_import(
     for (idx, item) in import.metadata_groups.into_iter().enumerate() {
         ryot_log!(
             debug,
-            "Importing media group with identifier = {iden}",
-            iden = &item.title
+            "Importing media group with identifier = {identifier}",
+            identifier = &item.title
         );
         let rev_length = item.reviews.len();
         let data =
