@@ -25,6 +25,7 @@ import { match } from "ts-pattern";
 import { withFragment } from "ufo";
 import { v4 as randomUUID } from "uuid";
 import {
+	CURRENT_WORKOUT_KEY,
 	type FitnessAction,
 	clientGqlService,
 	dayjsLib,
@@ -79,13 +80,13 @@ export type InProgressWorkout = {
 	exercises: Array<Exercise>;
 	replacingExerciseIdx?: number;
 	updateWorkoutTemplateId?: string;
-	currentActionOrCompleted: FitnessAction | true;
+	currentActionOrCompleted: FitnessAction;
 };
 
 type CurrentWorkout = InProgressWorkout | null;
 
 const currentWorkoutAtom = atomWithStorage<CurrentWorkout>(
-	"CurrentWorkout",
+	CURRENT_WORKOUT_KEY,
 	null,
 );
 
@@ -349,7 +350,6 @@ export const addExerciseToWorkout = async (
 	setCurrentWorkout: (v: InProgressWorkout) => void,
 	selectedExercises: Array<{ name: string; lot: ExerciseLot }>,
 ) => {
-	if (currentWorkout.currentActionOrCompleted === true) return;
 	const draft = createDraft(currentWorkout);
 	const idxOfNextExercise = draft.exercises.length;
 	for (const [_exerciseIdx, ex] of selectedExercises.entries()) {

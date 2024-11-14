@@ -1,4 +1,4 @@
-use std::{collections::HashMap, iter::zip, sync::Arc};
+use std::{cmp::Reverse, collections::HashMap, iter::zip, sync::Arc};
 
 use anyhow::{bail, Result as AnyhowResult};
 use application_utils::get_current_date;
@@ -11,8 +11,8 @@ use common_models::{
 };
 use common_utils::{ryot_log, SHOW_SPECIAL_SEASON_NAMES};
 use database_models::{
-    collection_to_entity, genre, metadata, metadata_group, metadata_to_genre, metadata_to_metadata,
-    metadata_to_person, monitored_entity, person,
+    collection_to_entity, exercise, genre, metadata, metadata_group, metadata_to_genre,
+    metadata_to_metadata, metadata_to_person, monitored_entity, person,
     prelude::{
         Collection, CollectionToEntity, Exercise, Genre, Metadata, MetadataGroup, MetadataToGenre,
         MetadataToMetadata, MetadataToPerson, MonitoredEntity, Person, Seen, UserToEntity, Workout,
@@ -33,7 +33,9 @@ use fitness_models::{
     ExerciseBestSetRecord, ProcessedExercise, UserExerciseInput,
     UserToExerciseBestSetExtraInformation, UserToExerciseExtraInformation,
     UserToExerciseHistoryExtraInformation, UserWorkoutInput, UserWorkoutSetRecord,
-    WorkoutInformation, WorkoutOrExerciseTotals, WorkoutSetPersonalBest, WorkoutSetRecord,
+    WorkoutEquipmentFocusedSummary, WorkoutFocusedSummary, WorkoutForceFocusedSummary,
+    WorkoutInformation, WorkoutLevelFocusedSummary, WorkoutLotFocusedSummary,
+    WorkoutMuscleFocusedSummary, WorkoutOrExerciseTotals, WorkoutSetPersonalBest, WorkoutSetRecord,
     WorkoutSetStatistic, WorkoutSetTotals, WorkoutSummary, WorkoutSummaryExercise, LOT_MAPPINGS,
 };
 use importer_models::{ImportDetails, ImportFailStep, ImportFailedItem, ImportResultResponse};
@@ -1434,20 +1436,21 @@ pub async fn progress_update(
             } else {
                 None
             };
-            let finished_on = if action == ProgressUpdateAction::JustStarted {
-                None
-            } else {
-                input.date
+            let finished_on = match action {
+                ProgressUpdateAction::JustStarted => None,
+                _ => input.date,
             };
             ryot_log!(debug, "Progress update finished on = {:?}", finished_on);
-            let (progress, started_on) = if matches!(action, ProgressUpdateAction::JustStarted) {
-                (
+            let (progress, mut started_on) = match action {
+                ProgressUpdateAction::JustStarted => (
                     input.progress.unwrap_or(dec!(0)),
                     Some(Utc::now().date_naive()),
-                )
-            } else {
-                (dec!(100), None)
+                ),
+                _ => (dec!(100), None),
             };
+            if matches!(action, ProgressUpdateAction::InThePast) && input.start_date.is_some() {
+                started_on = input.start_date;
+            }
             ryot_log!(debug, "Progress update percentage = {:?}", progress);
             let seen_insert = seen::ActiveModel {
                 progress: ActiveValue::Set(progress),
@@ -1602,6 +1605,71 @@ fn clean_values(value: &mut UserWorkoutSetRecord, exercise_lot: &ExerciseLot) {
         }
     }
     value.statistic = stats;
+}
+
+pub async fn get_focused_workout_summary(
+    exercises: &Vec<ProcessedExercise>,
+    ss: &Arc<SupportingService>,
+) -> WorkoutFocusedSummary {
+    let db_exercises = Exercise::find()
+        .filter(exercise::Column::Id.is_in(exercises.iter().map(|e| e.name.clone())))
+        .all(&ss.db)
+        .await
+        .unwrap();
+    let mut lots = HashMap::new();
+    let mut levels = HashMap::new();
+    let mut forces = HashMap::new();
+    let mut muscles = HashMap::new();
+    let mut equipments = HashMap::new();
+    for (idx, ex) in exercises.iter().enumerate() {
+        let exercise = db_exercises.iter().find(|e| e.id == ex.name).unwrap();
+        lots.entry(exercise.lot).or_insert(vec![]).push(idx);
+        levels.entry(exercise.level).or_insert(vec![]).push(idx);
+        if let Some(force) = exercise.force {
+            forces.entry(force).or_insert(vec![]).push(idx);
+        }
+        if let Some(equipment) = exercise.equipment {
+            equipments.entry(equipment).or_insert(vec![]).push(idx);
+        }
+        exercise.muscles.iter().for_each(|m| {
+            muscles.entry(*m).or_insert(vec![]).push(idx);
+        });
+    }
+    let lots = lots
+        .into_iter()
+        .map(|(lot, exercises)| WorkoutLotFocusedSummary { lot, exercises })
+        .sorted_by_key(|f| Reverse(f.exercises.len()))
+        .collect();
+    let levels = levels
+        .into_iter()
+        .map(|(level, exercises)| WorkoutLevelFocusedSummary { level, exercises })
+        .sorted_by_key(|f| Reverse(f.exercises.len()))
+        .collect();
+    let forces = forces
+        .into_iter()
+        .map(|(force, exercises)| WorkoutForceFocusedSummary { force, exercises })
+        .sorted_by_key(|f| Reverse(f.exercises.len()))
+        .collect();
+    let muscles = muscles
+        .into_iter()
+        .map(|(muscle, exercises)| WorkoutMuscleFocusedSummary { muscle, exercises })
+        .sorted_by_key(|f| Reverse(f.exercises.len()))
+        .collect();
+    let equipments = equipments
+        .into_iter()
+        .map(|(equipment, exercises)| WorkoutEquipmentFocusedSummary {
+            equipment,
+            exercises,
+        })
+        .sorted_by_key(|f| Reverse(f.exercises.len()))
+        .collect();
+    WorkoutFocusedSummary {
+        lots,
+        levels,
+        forces,
+        muscles,
+        equipments,
+    }
 }
 
 /// Create a workout in the database and also update user and exercise associations.
@@ -1830,7 +1898,15 @@ pub async fn create_or_update_workout(
             },
         ));
     }
+    input.supersets.retain(|s| {
+        s.exercises.len() > 1
+            && s.exercises
+                .iter()
+                .all(|s| exercises.get(*s as usize).is_some())
+    });
     let summary_total = workout_totals.into_iter().sum();
+    let processed_exercises = exercises.clone().into_iter().map(|(_, _, ex)| ex).collect();
+    let focused = get_focused_workout_summary(&processed_exercises, &ss).await;
     let model = workout::Model {
         end_time,
         name: input.name,
@@ -1839,6 +1915,7 @@ pub async fn create_or_update_workout(
         start_time: input.start_time,
         repeated_from: input.repeated_from,
         summary: WorkoutSummary {
+            focused,
             total: Some(summary_total),
             exercises: exercises
                 .clone()
@@ -1855,7 +1932,7 @@ pub async fn create_or_update_workout(
             assets: input.assets,
             comment: input.comment,
             supersets: input.supersets,
-            exercises: exercises.into_iter().map(|(_, _, ex)| ex).collect(),
+            exercises: processed_exercises,
         },
         template_id: input.template_id,
         duration: 0,
@@ -1977,17 +2054,18 @@ pub async fn process_import(
                 user_id,
                 respect_cache,
                 ProgressUpdateInput {
-                    metadata_id: metadata.id.clone(),
                     progress,
+                    change_state: None,
                     date: seen.ended_on,
+                    start_date: seen.started_on,
+                    metadata_id: metadata.id.clone(),
                     show_season_number: seen.show_season_number,
                     show_episode_number: seen.show_episode_number,
-                    podcast_episode_number: seen.podcast_episode_number,
+                    manga_volume_number: seen.manga_volume_number,
                     anime_episode_number: seen.anime_episode_number,
                     manga_chapter_number: seen.manga_chapter_number,
-                    manga_volume_number: seen.manga_volume_number,
+                    podcast_episode_number: seen.podcast_episode_number,
                     provider_watched_on: seen.provider_watched_on.clone(),
-                    change_state: None,
                 },
                 ss,
             )
